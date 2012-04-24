@@ -17,6 +17,8 @@
    See the COPYING file for a copy of the GNU General Public License.
 */
 
+#include <time.h>
+#include <bits/time.h>
 #include "frame.h"
 #include "client.h"
 #include "openbox.h"
@@ -40,8 +42,10 @@
                            ButtonMotionMask | PointerMotionMask | \
                            EnterWindowMask | LeaveWindowMask)
 
-#define FRAME_ANIMATE_ICONIFY_TIME 150000 /* .15 seconds */
-#define FRAME_ANIMATE_ICONIFY_STEP_TIME (1000 / 60) /* 60 Hz */
+// #define FRAME_ANIMATE_ICONIFY_TIME 150000 /* .15 seconds */
+//#define FRAME_ANIMATE_ICONIFY_TIME 5000000  -- good for vnc max
+#define FRAME_ANIMATE_ICONIFY_TIME 350000 
+#define FRAME_ANIMATE_ICONIFY_STEP_TIME (1000 / 60)
 
 #define FRAME_HANDLE_Y(f) (f->size.top + f->client->area.height + f->cbwidth_b)
 
@@ -348,7 +352,8 @@ void frame_adjust_area(ObFrame *self, gboolean moved,
         self->shaded = self->client->shaded;
 
         if (self->decorations & OB_FRAME_DECOR_BORDER)
-            self->bwidth = ob_rr_theme->fbwidth;
+            self->bwidth = self->client->undecorated ?
+                ob_rr_theme->ubwidth : ob_rr_theme->fbwidth;
         else
             self->bwidth = 0;
 
@@ -1701,16 +1706,29 @@ void frame_flash_stop(ObFrame *self)
     self->flashing = FALSE;
 }
 
+static gfloat animate_iconify_dtime = 0.0;
+
+static void reset_animate_iconify_time_delta() {
+    animate_iconify_dtime = 0.1;
+}
+
 static gulong frame_animate_iconify_time_left(ObFrame *self,
                                               const GTimeVal *now)
 {
     glong sec, usec;
+    static cycles = 0;
+
+    cycles++;
     sec = self->iconify_animation_end.tv_sec - now->tv_sec;
     usec = self->iconify_animation_end.tv_usec - now->tv_usec;
     if (usec < 0) {
         usec += G_USEC_PER_SEC;
         sec--;
     }
+
+    //animate_iconify_dtime -= FRAME_ANIMATE_ICONIFY_STEP_TIME*300*cycles;
+    animate_iconify_dtime = animate_iconify_dtime * 1.45;
+    usec -= animate_iconify_dtime;
     /* no negative values */
     return MAX(sec * G_USEC_PER_SEC + usec, 0);
 }
@@ -1718,64 +1736,37 @@ static gulong frame_animate_iconify_time_left(ObFrame *self,
 static gboolean frame_animate_iconify(gpointer p)
 {
     ObFrame *self = p;
-    gint x, y, w, h;
-    gint iconx, icony, iconw;
+    gint y;
+    gint start_y;
+    gint unmin_y, min_y;
     GTimeVal now;
     gulong time;
     gboolean iconifying;
 
-    if (self->client->icon_geometry.width == 0) {
-        /* there is no icon geometry set so just go straight down */
-        const Rect *a;
-
-        a = screen_physical_area_monitor(screen_find_monitor(&self->area));
-        iconx = self->area.x + self->area.width / 2 + 32;
-        icony = a->y + a->width;
-        iconw = 64;
-    } else {
-        iconx = self->client->icon_geometry.x;
-        icony = self->client->icon_geometry.y;
-        iconw = self->client->icon_geometry.width;
-    }
+    const Rect *a;
+    a = screen_physical_area_monitor(screen_find_monitor(&self->area));
 
     iconifying = self->iconify_animation_going > 0;
+    unmin_y = self->area.y;
+    min_y = a->height;
+    start_y = (iconifying) ? unmin_y : min_y;
 
-    /* how far do we have left to go ? */
     g_get_current_time(&now);
     time = frame_animate_iconify_time_left(self, &now);
 
-    if ((time > 0 && iconifying) || (time == 0 && !iconifying)) {
-        /* start where the frame is supposed to be */
-        x = self->area.x;
-        y = self->area.y;
-        w = self->area.width;
-        h = self->area.height;
-    } else {
-        /* start at the icon */
-        x = iconx;
-        y = icony;
-        w = iconw;
-        h = self->size.top; /* just the titlebar */
-    }
-
     if (time > 0) {
-        glong dx, dy, dw;
+        glong dy;
         glong elapsed;
 
-        dx = self->area.x - iconx;
-        dy = self->area.y - icony;
-        dw = self->area.width - self->bwidth * 2 - iconw;
-         /* if restoring, we move in the opposite direction */
-        if (!iconifying) { dx = -dx; dy = -dy; dw = -dw; }
+        /* if restoring, we move in the opposite direction */
+        dy = unmin_y - min_y;
+        if (!iconifying) dy = -dy;
 
         elapsed = FRAME_ANIMATE_ICONIFY_TIME - time;
-        x = x - (dx * elapsed) / FRAME_ANIMATE_ICONIFY_TIME;
-        y = y - (dy * elapsed) / FRAME_ANIMATE_ICONIFY_TIME;
-        w = w - (dw * elapsed) / FRAME_ANIMATE_ICONIFY_TIME;
-        h = self->size.top; /* just the titlebar */
+        y = start_y - (dy * elapsed) / FRAME_ANIMATE_ICONIFY_TIME;
     }
 
-    XMoveResizeWindow(obt_display, self->window, x, y, w, h);
+    XMoveWindow(obt_display, self->window, self->area.x, y);
     XFlush(obt_display);
 
     if (time == 0)
@@ -1811,6 +1802,7 @@ void frame_end_iconify_animation(ObFrame *self)
     XFlush(obt_display);
 }
 
+
 void frame_begin_iconify_animation(ObFrame *self, gboolean iconifying)
 {
     gulong time;
@@ -1829,14 +1821,16 @@ void frame_begin_iconify_animation(ObFrame *self, gboolean iconifying)
     /* get how long until the end */
     time = FRAME_ANIMATE_ICONIFY_TIME;
     if (self->iconify_animation_going) {
-        if (!!iconifying != (self->iconify_animation_going > 0)) {
+        if (iconifying != (self->iconify_animation_going > 0)) {
             /* animation was already going on in the opposite direction */
             time = time - frame_animate_iconify_time_left(self, &now);
         } else
             /* animation was already going in the same direction */
             set_end = FALSE;
-    } else
+    } else {
         new_anim = TRUE;
+    }
+
     self->iconify_animation_going = iconifying ? 1 : -1;
 
     /* set the ending time */
@@ -1846,17 +1840,15 @@ void frame_begin_iconify_animation(ObFrame *self, gboolean iconifying)
         g_time_val_add(&self->iconify_animation_end, time);
     }
 
+    reset_animate_iconify_time_delta();
     if (new_anim) {
-        if (self->iconify_animation_timer)
+        if (self->iconify_animation_timer) {
             g_source_remove(self->iconify_animation_timer);
+        }
         self->iconify_animation_timer =
-            g_timeout_add_full(G_PRIORITY_DEFAULT,
-                               FRAME_ANIMATE_ICONIFY_STEP_TIME,
-                               frame_animate_iconify, self, NULL);
-                               
-
-        /* do the first step */
-        frame_animate_iconify(self);
+                g_timeout_add_full(G_PRIORITY_DEFAULT,
+                                   FRAME_ANIMATE_ICONIFY_STEP_TIME,
+                                   frame_animate_iconify, self, NULL);
 
         /* show it during the animation even if it is not "visible" */
         if (!self->visible)
