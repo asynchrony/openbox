@@ -3,6 +3,9 @@
 BUILD_DIR=${HOME}/openbox
 CURRENT_DIR=`pwd`
 
+# clean up extraneous build artifacts from previous runs
+rm -f *.tgz
+
 # create directory to build all artifacts
 mkdir -p ${BUILD_DIR}/usr
 
