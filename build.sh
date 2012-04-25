@@ -10,6 +10,7 @@ rm -f *.tgz
 mkdir -p ${BUILD_DIR}/usr
 
 # build openbox
+./bootstrap
 ./configure --prefix=${BUILD_DIR}/usr
 make clean
 make install
